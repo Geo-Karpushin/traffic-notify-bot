@@ -32,6 +32,13 @@ if not YANDEX_API_KEY:
     raise RuntimeError("Ошибка: переменная окружения YANDEX_MAPS_API_KEY не найдена в .env!")
 
 JSON_STORAGE = "accidents.json"
+if os.path.exists(JSON_STORAGE):
+    with open(JSON_STORAGE, "r") as f:
+        CURRENT_ACCIDENTS = {tuple(map(float, k.split(","))): v for k, v in json.load(f).items()}
+    print(f"Загружено старых ДТП: {len(CURRENT_ACCIDENTS)}")
+else:
+    CURRENT_ACCIDENTS = {}
+
 DEFAULT_ZOOM = 11
 DEFAULT_INTERVAL = 15
 
@@ -75,7 +82,6 @@ def get_yandex_layer_version(layer="trfe", lang="ru_RU"):
 
 def fetch_tile_json(x, y, z, version):
     url = f"https://core-road-events-renderer.maps.yandex.net/1.1/tiles?l=trje&lang=ru_RU&x={x}&y={y}&z={z}&scale=1&v={version}&apikey={YANDEX_API_KEY}&callback=x_{x}_y_{y}_z_{z}_l_trje__t"
-    print(url)
     try:
         print(f"→ Скачиваем тайл: x={x}, y={y}, z={z}")
         resp = requests.get(url)
@@ -118,6 +124,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_users()
     await update.message.reply_text("Привет! Ты подписан на уведомления.")
 
+async def actual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not CURRENT_ACCIDENTS:  # More Pythonic way to check empty list
+        message = "Сейчас в Москве нет ни одного ДТП"
+    else:
+        message = "ДТП В МОСКВЕ\n\n"
+        message += "\n".join(f"⚠️ {acc}" for acc in CURRENT_ACCIDENTS)
+    
+    await update.message.reply_text(message)
+
 async def send_notification(app, text: str):
     for user_id in USERS:
         try:
@@ -126,13 +141,7 @@ async def send_notification(app, text: str):
             print(f"Не удалось отправить сообщение {user_id}: {e}")
 
 async def fetch_and_notify(app, args):
-    if os.path.exists(JSON_STORAGE):
-        with open(JSON_STORAGE, "r") as f:
-            old_accidents = {tuple(map(float, k.split(","))): v for k, v in json.load(f).items()}
-        print(f"Загружено старых ДТП: {len(old_accidents)}")
-    else:
-        old_accidents = {}
-
+    global CURRENT_ACCIDENTS
     while True:
         x_min, y_max = latlon_to_tile(args.lon_min, args.lat_min, args.zoom)
         x_max, y_min = latlon_to_tile(args.lon_max, args.lat_max, args.zoom)
@@ -160,15 +169,16 @@ async def fetch_and_notify(app, args):
 
         appeared_accidents = []
         for acc in new_accidents:
-            if acc not in old_accidents:
+            if acc not in CURRENT_ACCIDENTS:
                 appeared_accidents.append(f"🆕 Новое ДТП: {acc}")
 
         resolved_accidents = []
-        for acc in old_accidents:
+        for acc in CURRENT_ACCIDENTS:
             if acc not in new_accidents:
                 resolved_accidents.append(f"✅ ДТП разрешено: {acc}")
 
-        if len(appeared_accidents) > 0 and len(resolved_accidents) > 0:
+        if len(appeared_accidents) > 0 or len(resolved_accidents) > 0:
+            print(f"Зафиксировано {len(appeared_accidents)} новых и {len(resolved_accidents)} разрешённых ДТП")
             message = "НОВЫЕ СОБЫТИЯ В МОСКВЕ\n\n"
             message += "\n".join(appeared_accidents)
             if len(appeared_accidents) > 0:
@@ -180,7 +190,7 @@ async def fetch_and_notify(app, args):
             json.dump({f"{k[0]},{k[1]}": v for k, v in new_accidents.items()}, f, indent=2)
         print(f"Актуальный словарь сохранён: {JSON_STORAGE}")
 
-        old_accidents = new_accidents
+        CURRENT_ACCIDENTS = new_accidents
 
         print(f"Ожидание {args.interval} секунд до следующего обновления...\n")
         await asyncio.sleep(args.interval)
@@ -198,6 +208,7 @@ async def main():
 
     app = ApplicationBuilder().token(TG_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("actual", actual))
 
     print("Телеграм бот запущен...")
 
