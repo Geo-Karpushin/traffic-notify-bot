@@ -42,8 +42,40 @@ def latlon_to_tile(lon, lat, zoom):
     ytile = int((1.0 - math.log(math.tan(lat_rad) + 1 / math.cos(lat_rad)) / math.pi) / 2.0 * n)
     return xtile, ytile
 
-def fetch_tile_json(x, y, z):
-    url = f"https://core-road-events-renderer.maps.yandex.net/1.1/tiles?l=trje&lang=ru_RU&x={x}&y={y}&z={z}&scale=1&v=2025.11.25.22.21.42&apikey={YANDEX_API_KEY}&callback=x_{x}_y_{y}_z_{z}_l_trje__t"
+def get_yandex_layer_version(layer="trfe", lang="ru_RU"):
+    """
+    Получает актуальную версию слоя тайлов из официального API Яндекс.Карт.
+    По умолчанию — слой ДТП (trfe).
+    
+    Возвращает: строку версии (например "2025.11.25.22.46.00")
+    или None при ошибке.
+    """
+    url = (
+        "https://api-maps.yandex.ru/services/coverage/v2/layers_stamps"
+        f"?lang={lang}&l={layer}"
+    )
+
+    try:
+        resp = requests.get(url, timeout=5)
+        if resp.status_code != 200:
+            print(f"⚠ Ошибка API версии слоёв: HTTP {resp.status_code}")
+            return None
+
+        data = resp.json()
+
+        if layer not in data or "version" not in data[layer]:
+            print(f"⚠ В ответе нет версии слоя {layer}: {data}")
+            return None
+
+        return data[layer]["version"]
+
+    except Exception as e:
+        print(f"❌ Ошибка при получении версии слоя {layer}: {e}")
+        return None
+
+def fetch_tile_json(x, y, z, version):
+    url = f"https://core-road-events-renderer.maps.yandex.net/1.1/tiles?l=trje&lang=ru_RU&x={x}&y={y}&z={z}&scale=1&v={version}&apikey={YANDEX_API_KEY}&callback=x_{x}_y_{y}_z_{z}_l_trje__t"
+    print(url)
     try:
         print(f"→ Скачиваем тайл: x={x}, y={y}, z={z}")
         resp = requests.get(url)
@@ -114,9 +146,11 @@ async def fetch_and_notify(app, args):
 
         new_accidents = {}
 
+        version = get_yandex_layer_version()
+
         for x in range(x_min, x_max + 1):
             for y in range(y_min, y_max + 1):
-                data = fetch_tile_json(x, y, args.zoom)
+                data = fetch_tile_json(x, y, args.zoom, version)
                 if not data:
                     continue
                 accidents = extract_accidents(data, args.lat_min, args.lon_min, args.lat_max, args.lon_max)
