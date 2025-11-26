@@ -42,7 +42,7 @@ else:
 DEFAULT_ZOOM = 11
 DEFAULT_INTERVAL = 15
 
-def latlon_to_tile(lon, lat, zoom):
+def latlon_to_tile(lat, lon, zoom):
     lat_rad = math.radians(lat)
     n = 2 ** zoom
     xtile = int((lon + 180.0) / 360.0 * n)
@@ -126,9 +126,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def actual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not CURRENT_ACCIDENTS:  # More Pythonic way to check empty list
-        message = "Сейчас в Москве нет ни одного ДТП"
+        message = "Сейчас в заданной области нет ни одного ДТП"
     else:
-        message = "ДТП В МОСКВЕ\n\n"
+        message = "ТЕКУЩИЕ ДТП\n\n"
         message += "\n".join(f"⚠️ {acc}" for acc in CURRENT_ACCIDENTS)
     
     await update.message.reply_text(message)
@@ -143,8 +143,15 @@ async def send_notification(app, text: str):
 async def fetch_and_notify(app, args):
     global CURRENT_ACCIDENTS
     while True:
-        x_min, y_max = latlon_to_tile(args.lon_min, args.lat_min, args.zoom)
-        x_max, y_min = latlon_to_tile(args.lon_max, args.lat_max, args.zoom)
+        x1, y1 = latlon_to_tile(args.lat_min, args.lon_min, args.zoom)
+        x2, y2 = latlon_to_tile(args.lat_max, args.lon_max, args.zoom)
+
+        x_min, x_max = sorted((x1, x2))
+        y_min, y_max = sorted((y1, y2))
+        
+        y_min += 2
+        y_max += 2
+
         print(f"Вычислены тайлы: x [{x_min}, {x_max}], y [{y_min}, {y_max}]")
         print(f"Границы области: lat [{args.lat_min:.2f}-{args.lat_max:.2f}], lon [{args.lon_min:.2f}-{args.lon_max:.2f}]")
 
@@ -179,7 +186,7 @@ async def fetch_and_notify(app, args):
 
         if len(appeared_accidents) > 0 or len(resolved_accidents) > 0:
             print(f"Зафиксировано {len(appeared_accidents)} новых и {len(resolved_accidents)} разрешённых ДТП")
-            message = "НОВЫЕ СОБЫТИЯ В МОСКВЕ\n\n"
+            message = "НОВЫЕ СОБЫТИЯ\n\n"
             message += "\n".join(appeared_accidents)
             if len(appeared_accidents) > 0:
                 message += "\n\n"
