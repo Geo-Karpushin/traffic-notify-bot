@@ -148,7 +148,7 @@ async def fetch_and_notify(app, args):
 
         x_min, x_max = sorted((x1, x2))
         y_min, y_max = sorted((y1, y2))
-        
+
         y_min += 2
         y_max += 2
 
@@ -212,6 +212,9 @@ async def main():
     parser.add_argument("--zoom", type=int, default=DEFAULT_ZOOM)
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL)
     args = parser.parse_args()
+
+    args.lat_min, args.lat_max = sorted((args.lat_min, args.lat_max))
+    args.lon_min, args.lon_max = sorted((args.lon_min, args.lon_max))
 
     app = ApplicationBuilder().token(TG_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
