@@ -9,6 +9,7 @@ import asyncio
 import threading
 import nest_asyncio
 import aiohttp
+import random
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -28,6 +29,12 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 USERS_FILE = "users.json"
 PENDING_FILE = "pending.json" 
 KNOWN_FILE = "known_users.json"
+
+BATCH_SIZE = 100
+BASE_DELAY = 0.5
+RANDOM_JITTER = 0.3
+BACKOFF_STEP = 2
+MAX_BACKOFF = 30
 
 def load_json(path, default):
     try:
@@ -423,6 +430,66 @@ async def send_notification(app, text: str):
         except Exception as e:
             print(f"Не удалось отправить сообщение {user_id}: {e}")
 
+async def fetch_tiles_in_batches(session, coords, zoom, version):
+    tiles_data = []
+    delay = BASE_DELAY
+
+    for i in range(0, len(coords), BATCH_SIZE):
+        batch_coords = coords[i:i + BATCH_SIZE]
+        batch_index = i // BATCH_SIZE + 1
+
+        print(f"[Пачка {batch_index}] {len(batch_coords)} запросов...")
+
+        # создаём задачи ТОЛЬКО для текущей пачки
+        tasks = [
+            fetch_tile_json(session, x, y, zoom, version)
+            for (x, y) in batch_coords
+        ]
+
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            print(f"❌ Ошибка batch gather: {e}")
+            results = [None] * len(batch_coords)
+
+        had_rate_limit = False
+        processed_results = []
+
+        for res in results:
+            # успешный JSON
+            if isinstance(res, dict):
+                processed_results.append(res)
+                continue
+
+            # aiohttp ошибок
+            if hasattr(res, "status"):
+                status = res.status
+
+                if status == 429:
+                    had_rate_limit = True
+                    print("⚠️ Получен 429 — замедление.")
+                elif 500 <= status < 600:
+                    print(f"⚠️ Серверная ошибка {status}, увеличиваем задержку.")
+                    had_rate_limit = True
+
+            processed_results.append(None)
+
+        tiles_data.extend(processed_results)
+
+        # backoff
+        if had_rate_limit:
+            delay = min(delay * BACKOFF_STEP, MAX_BACKOFF)
+        else:
+            delay = BASE_DELAY
+
+        jitter = random.uniform(-RANDOM_JITTER, RANDOM_JITTER)
+        sleep_time = max(0.1, delay + jitter)
+
+        print(f"⏳ Пауза {sleep_time:.2f} сек...")
+        await asyncio.sleep(sleep_time)
+
+    return tiles_data
+
 async def fetch_and_notify(app, args):
     global CURRENT_ACCIDENTS
 
@@ -436,25 +503,28 @@ async def fetch_and_notify(app, args):
             y_min, y_max = sorted((y1, y2))
 
             print(f"Вычислены тайлы: x [{x_min}, {x_max}], y [{y_min}, {y_max}]")
-            print(f"Границы области: lat [{args.lat_min:.2f}-{args.lat_max:.2f}], lon [{args.lon_min:.2f}-{args.lon_max:.2f}]")
+            print(f"Границы области: lat [{args.lat_min:.2f}-{args.lat_max:.2f}], "
+                  f"lon [{args.lon_min:.2f}-{args.lon_max:.2f}]")
 
             version = get_yandex_layer_version()
 
-            tasks = []
-            coords = []
+            # только coords — без задач
+            coords = [
+                (x, y)
+                for x in range(x_min, x_max + 1)
+                for y in range(y_min, y_max + 1)
+            ]
 
-            for x in range(x_min, x_max + 1):
-                for y in range(y_min, y_max + 1):
-                    tasks.append(fetch_tile_json(session, x, y, args.zoom, version))
-                    coords.append((x, y))
-
-            tiles_data = await asyncio.gather(*tasks)
+            # получение JSON пачками
+            tiles_data = await fetch_tiles_in_batches(session, coords, args.zoom, version)
 
             new_accidents = {}
 
+            # сопоставление 1:1
             for (x, y), data in zip(coords, tiles_data):
                 if not data:
                     continue
+
                 accidents = extract_accidents(
                     data,
                     args.lat_min, args.lon_min,
@@ -464,31 +534,33 @@ async def fetch_and_notify(app, args):
 
             print(f"Общее количество ДТП в текущем цикле: {len(new_accidents)}")
 
-            appeared_accidents = []
-            for acc in new_accidents:
-                if acc not in CURRENT_ACCIDENTS:
-                    lat, lon = acc
-                    appeared_accidents.append(f"🆕 Новое ДТП: {make_yandex_link(lat, lon)}")
+            # новыe
+            appeared_accidents = [
+                f"🆕 Новое ДТП: {make_yandex_link(lat, lon)}"
+                for (lat, lon) in new_accidents
+                if (lat, lon) not in CURRENT_ACCIDENTS
+            ]
 
-            resolved_accidents = []
-            for acc in CURRENT_ACCIDENTS:
-                if acc not in new_accidents:
-                    lat, lon = acc
-                    resolved_accidents.append(f"✅ ДТП разрешено: {make_yandex_link(lat, lon)}")
+            # исчезнувшие
+            resolved_accidents = [
+                f"✅ ДТП разрешено: {make_yandex_link(lat, lon)}"
+                for (lat, lon) in CURRENT_ACCIDENTS
+                if (lat, lon) not in new_accidents
+            ]
 
             if appeared_accidents or resolved_accidents:
-                print(f"Зафиксировано {len(appeared_accidents)} новых и {len(resolved_accidents)} разрешённых ДТП")
+                print(f"Зафиксировано {len(appeared_accidents)} новых и "
+                      f"{len(resolved_accidents)} разрешённых ДТП")
 
                 message = "НОВЫЕ СОБЫТИЯ\n\n"
                 message += "\n".join(appeared_accidents)
-
                 if appeared_accidents:
                     message += "\n\n"
-
                 message += "\n".join(resolved_accidents)
 
                 asyncio.create_task(send_notification(app, message))
 
+            # запись
             with open(JSON_STORAGE, "w") as f:
                 json.dump(
                     {f"{k[0]},{k[1]}": v for k, v in new_accidents.items()},
@@ -542,4 +614,4 @@ async def main():
     await app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(main())
+    asyncio.run(main())
