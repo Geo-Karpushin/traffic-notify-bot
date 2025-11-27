@@ -92,9 +92,13 @@ def make_yandex_link(lat, lon):
 def latlon_to_tile(lat, lon, zoom):
     lat_rad = math.radians(lat)
     n = 2 ** zoom
-    xtile = int((lon + 180.0) / 360.0 * n)
-    ytile = int((1.0 - math.log(math.tan(lat_rad) + 1 / math.cos(lat_rad)) / math.pi) / 2.0 * n)
-    return xtile, ytile
+
+    x = (lon + 180.0) / 360.0 * n
+
+    a = math.tan(math.pi/4 + lat_rad/2)
+    y = (1 - math.log(a) / math.pi) / 2 * n
+
+    return int(x), int(y)
 
 def get_yandex_layer_version(layer="trfe", lang="ru_RU"):
     url = (
@@ -414,9 +418,6 @@ async def fetch_and_notify(app, args):
 
         x_min, x_max = sorted((x1, x2))
         y_min, y_max = sorted((y1, y2))
-
-        y_min += 2
-        y_max += 2
 
         print(f"Вычислены тайлы: x [{x_min}, {x_max}], y [{y_min}, {y_max}]")
         print(f"Границы области: lat [{args.lat_min:.2f}-{args.lat_max:.2f}], lon [{args.lon_min:.2f}-{args.lon_max:.2f}]")
