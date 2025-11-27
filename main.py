@@ -8,6 +8,7 @@ import requests
 import asyncio
 import threading
 import nest_asyncio
+import aiohttp
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -119,28 +120,40 @@ def get_yandex_layer_version(layer="trfe", lang="ru_RU"):
         print(f"❌ Ошибка при получении версии слоя {layer}: {e}")
         return None
 
+async def fetch_tile_json(session, x, y, z, version):
+    url = (
+        "https://core-road-events-renderer.maps.yandex.net/1.1/tiles"
+        f"?l=trje&lang=ru_RU&x={x}&y={y}&z={z}&scale=1&v={version}"
+        f"&apikey={YANDEX_API_KEY}&callback=x_{x}_y_{y}_z_{z}_l_trje__t"
+    )
 
-def fetch_tile_json(x, y, z, version):
-    url = f"https://core-road-events-renderer.maps.yandex.net/1.1/tiles?l=trje&lang=ru_RU&x={x}&y={y}&z={z}&scale=1&v={version}&apikey={YANDEX_API_KEY}&callback=x_{x}_y_{y}_z_{z}_l_trje__t"
+    # print(f"→ Скачиваем тайл: x={x}, y={y}, z={z}")
+
     try:
-        print(f"→ Скачиваем тайл: x={x}, y={y}, z={z}")
-        resp = requests.get(url)
-        text = resp.text
-        start = text.find("(")
-        end = text.rfind(");")
-        json_text = text[start+1:end]
-        data = json.loads(json_text)
-        return data
+        async with session.get(url, timeout=10) as resp:
+            text = await resp.text()
+
+            # JSONP: ищем скобки
+            start = text.find("(")
+            end = text.rfind(");")
+
+            if start == -1 or end == -1:
+                print(f"❌ Ошибка формата JSONP в тайле {x},{y},{z}")
+                return None
+
+            json_text = text[start + 1:end]
+
+            return json.loads(json_text)
+
     except Exception as e:
         print(f"❌ Ошибка при загрузке тайла {x},{y},{z}: {e}")
         return None
-
 
 def extract_accidents(data, lat_min, lon_min, lat_max, lon_max):
     accidents = {}
     try:
         features = data.get("data", {}).get("features", [])
-        print(f"   Найдено событий в тайле: {len(features)}")
+        # print(f"   Найдено событий в тайле: {len(features)}")
         for f in features:
             if f["properties"]["eventType"] == 1:
                 lat, lon = f["geometry"]["coordinates"]
@@ -412,64 +425,82 @@ async def send_notification(app, text: str):
 
 async def fetch_and_notify(app, args):
     global CURRENT_ACCIDENTS
-    while True:
-        x1, y1 = latlon_to_tile(args.lat_min, args.lon_min, args.zoom)
-        x2, y2 = latlon_to_tile(args.lat_max, args.lon_max, args.zoom)
 
-        x_min, x_max = sorted((x1, x2))
-        y_min, y_max = sorted((y1, y2))
+    async with aiohttp.ClientSession() as session:
 
-        print(f"Вычислены тайлы: x [{x_min}, {x_max}], y [{y_min}, {y_max}]")
-        print(f"Границы области: lat [{args.lat_min:.2f}-{args.lat_max:.2f}], lon [{args.lon_min:.2f}-{args.lon_max:.2f}]")
+        while True:
+            x1, y1 = latlon_to_tile(args.lat_min, args.lon_min, args.zoom)
+            x2, y2 = latlon_to_tile(args.lat_max, args.lon_max, args.zoom)
 
-        if y_min > y_max:
-            y_min, y_max = y_max, y_min
-        if x_min > x_max:
-            x_min, x_max = x_max, x_min
+            x_min, x_max = sorted((x1, x2))
+            y_min, y_max = sorted((y1, y2))
 
-        new_accidents = {}
+            print(f"Вычислены тайлы: x [{x_min}, {x_max}], y [{y_min}, {y_max}]")
+            print(f"Границы области: lat [{args.lat_min:.2f}-{args.lat_max:.2f}], lon [{args.lon_min:.2f}-{args.lon_max:.2f}]")
 
-        version = get_yandex_layer_version()
+            version = get_yandex_layer_version()
 
-        for x in range(x_min, x_max + 1):
-            for y in range(y_min, y_max + 1):
-                data = fetch_tile_json(x, y, args.zoom, version)
+            tasks = []
+            coords = []
+
+            for x in range(x_min, x_max + 1):
+                for y in range(y_min, y_max + 1):
+                    tasks.append(fetch_tile_json(session, x, y, args.zoom, version))
+                    coords.append((x, y))
+
+            tiles_data = await asyncio.gather(*tasks)
+
+            new_accidents = {}
+
+            for (x, y), data in zip(coords, tiles_data):
                 if not data:
                     continue
-                accidents = extract_accidents(data, args.lat_min, args.lon_min, args.lat_max, args.lon_max)
+                accidents = extract_accidents(
+                    data,
+                    args.lat_min, args.lon_min,
+                    args.lat_max, args.lon_max
+                )
                 new_accidents.update(accidents)
 
-        print(f"Общее количество ДТП в текущем цикле: {len(new_accidents)}")
+            print(f"Общее количество ДТП в текущем цикле: {len(new_accidents)}")
 
-        appeared_accidents = []
-        for acc in new_accidents:
-            if acc not in CURRENT_ACCIDENTS:
-                lat, lon = acc
-                appeared_accidents.append(f"🆕 Новое ДТП: {make_yandex_link(lat, lon)}")
+            appeared_accidents = []
+            for acc in new_accidents:
+                if acc not in CURRENT_ACCIDENTS:
+                    lat, lon = acc
+                    appeared_accidents.append(f"🆕 Новое ДТП: {make_yandex_link(lat, lon)}")
 
-        resolved_accidents = []
-        for acc in CURRENT_ACCIDENTS:
-            if acc not in new_accidents:
-                lat, lon = acc
-                resolved_accidents.append(f"✅ ДТП разрешено: {make_yandex_link(lat, lon)}")
+            resolved_accidents = []
+            for acc in CURRENT_ACCIDENTS:
+                if acc not in new_accidents:
+                    lat, lon = acc
+                    resolved_accidents.append(f"✅ ДТП разрешено: {make_yandex_link(lat, lon)}")
 
-        if len(appeared_accidents) > 0 or len(resolved_accidents) > 0:
-            print(f"Зафиксировано {len(appeared_accidents)} новых и {len(resolved_accidents)} разрешённых ДТП")
-            message = "НОВЫЕ СОБЫТИЯ\n\n"
-            message += "\n".join(appeared_accidents)
-            if len(appeared_accidents) > 0:
-                message += "\n\n"
-            message += "\n".join(resolved_accidents)
-            asyncio.create_task(send_notification(app, message))
+            if appeared_accidents or resolved_accidents:
+                print(f"Зафиксировано {len(appeared_accidents)} новых и {len(resolved_accidents)} разрешённых ДТП")
 
-        with open(JSON_STORAGE, "w") as f:
-            json.dump({f"{k[0]},{k[1]}": v for k, v in new_accidents.items()}, f, indent=2)
-        print(f"Актуальный словарь сохранён: {JSON_STORAGE}")
+                message = "НОВЫЕ СОБЫТИЯ\n\n"
+                message += "\n".join(appeared_accidents)
 
-        CURRENT_ACCIDENTS = new_accidents
+                if appeared_accidents:
+                    message += "\n\n"
 
-        print(f"Ожидание {args.interval} секунд до следующего обновления...")
-        await asyncio.sleep(args.interval)
+                message += "\n".join(resolved_accidents)
+
+                asyncio.create_task(send_notification(app, message))
+
+            with open(JSON_STORAGE, "w") as f:
+                json.dump(
+                    {f"{k[0]},{k[1]}": v for k, v in new_accidents.items()},
+                    f, indent=2
+                )
+
+            print(f"Актуальный словарь сохранён: {JSON_STORAGE}")
+
+            CURRENT_ACCIDENTS = new_accidents
+
+            print(f"Ожидание {args.interval} секунд до следующего обновления...")
+            await asyncio.sleep(args.interval)
 
 async def main():
     parser = argparse.ArgumentParser(description="Слежение за ДТП Яндекс.Карт")
