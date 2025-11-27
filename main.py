@@ -85,6 +85,10 @@ def update_env_admin(chat_id: int, username: str):
 
     print(f"[ENV] ADMIN_CHAT_ID={chat_id}")
 
+def make_yandex_link(lat, lon):
+    url = f"https://yandex.ru/maps/?ll={lon},{lat}&z=17"
+    return f"[{lat}, {lon}]({url})"
+
 def latlon_to_tile(lat, lon, zoom):
     lat_rad = math.radians(lat)
     n = 2 ** zoom
@@ -227,9 +231,12 @@ async def cmd_actual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = "Сейчас в заданной области нет ни одного ДТП"
     else:
         message = "ТЕКУЩИЕ ДТП\n\n"
-        message += "\n".join(f"⚠️ {acc}" for acc in CURRENT_ACCIDENTS)
+        message += "\n".join(
+            f"⚠️ {make_yandex_link(lat, lon)} — {desc}"
+            for (lat, lon), desc in CURRENT_ACCIDENTS.items()
+        )
     
-    await update.message.reply_text(message)
+    await update.message.reply_text(message, parse_mode="Markdown")
 
 async def cmd_access_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -395,7 +402,7 @@ async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_notification(app, text: str):
     for user_id in USERS:
         try:
-            await app.bot.send_message(chat_id=user_id, text=text)
+            await app.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
         except Exception as e:
             print(f"Не удалось отправить сообщение {user_id}: {e}")
 
@@ -436,12 +443,14 @@ async def fetch_and_notify(app, args):
         appeared_accidents = []
         for acc in new_accidents:
             if acc not in CURRENT_ACCIDENTS:
-                appeared_accidents.append(f"🆕 Новое ДТП: {acc}")
+                lat, lon = acc
+                appeared_accidents.append(f"🆕 Новое ДТП: {make_yandex_link(lat, lon)}")
 
         resolved_accidents = []
         for acc in CURRENT_ACCIDENTS:
             if acc not in new_accidents:
-                resolved_accidents.append(f"✅ ДТП разрешено: {acc}")
+                lat, lon = acc
+                resolved_accidents.append(f"✅ ДТП разрешено: {make_yandex_link(lat, lon)}")
 
         if len(appeared_accidents) > 0 or len(resolved_accidents) > 0:
             print(f"Зафиксировано {len(appeared_accidents)} новых и {len(resolved_accidents)} разрешённых ДТП")
